@@ -30,6 +30,7 @@ public class WrappedKafkaConsumer {
   private Histogram messageLagHistogram;
   private Meter messageMeter;
   private ScheduledExecutorService executorService;
+  private long startTime;
 
   public WrappedKafkaConsumer() {
     this.consumerProperties = new ConsumerProperties();
@@ -45,6 +46,8 @@ public class WrappedKafkaConsumer {
     consumer.subscribe(Collections.singletonList(consumerProperties.getTopic()));
     executorService.scheduleAtFixedRate(new StatsReporterRunnable(), 10000, 60000, TimeUnit.MILLISECONDS);
 
+    this.startTime = System.currentTimeMillis();
+
     while (true) {
       ConsumerRecords<String, String> records = consumer.poll(100);
 
@@ -53,7 +56,9 @@ public class WrappedKafkaConsumer {
           String messageJson = record.value();
           try {
             ImmutableTimedMessage timedMessage = objectMapper.readValue(messageJson, new TypeReference<ImmutableTimedMessage>() {});
-            messageLagHistogram.update(System.currentTimeMillis() - timedMessage.getTimestamp());
+            if (timedMessage.getTimestamp() > startTime) {
+              messageLagHistogram.update(System.currentTimeMillis() - timedMessage.getTimestamp());
+            }
             messageMeter.mark();
           } catch (IOException e) {
             LOG.error("Failed to parse message", e);
