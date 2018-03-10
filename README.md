@@ -4,9 +4,9 @@ An example Kafka producer and consumer
 
 ## Requirements
 
-- java 8
-- kafka 1.0.0
-- a running kafka cluster to produce to and consume from
+- Java 8
+- Kafka 1.0.0
+- A running kafka cluster to produce to and consume from
 
 ## Setup
 
