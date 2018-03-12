@@ -1,5 +1,6 @@
 package com.alex.producer;
 
+import com.alex.common.LockService;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.*;
 import org.apache.kafka.common.Metric;
@@ -9,6 +10,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.ProducerFencedException;
 import org.slf4j.LoggerFactory;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -20,35 +22,55 @@ import java.util.concurrent.atomic.AtomicReference;
 public class ProducerSupplier<K, V> implements Producer<K, V> {
 
   private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(ProducerSupplier.class);
+  private static final int REFRESH_SECONDS = 60;
+  private static final long CLOSE_DELAY_SECONDS = 30;
 
   private ProducerProperties producerProperties;
   private ScheduledExecutorService executorService;
   private AtomicReference<KafkaProducer<K, V>> mainKafkaProducer;
-  private KafkaProducer<K, V> backupKafkaProducer;
+  private ThreadLocal<KafkaProducer<K, V>> localclient;
+  private Instant lastCheck;
+  private LockService lockService;
 
   public ProducerSupplier(ProducerProperties producerProperties) {
     this.producerProperties = producerProperties;
+    this.lockService = new LockService();
+    lockService.start();
     this.executorService = Executors.newSingleThreadScheduledExecutor();
     this.mainKafkaProducer = new AtomicReference<>(new KafkaProducer<K, V>(producerProperties.getProperties()));
+    this.localclient = ThreadLocal.withInitial(mainKafkaProducer::get);
+    this.lastCheck = Instant.now();
 
-    executorService.scheduleAtFixedRate(this::rotateProducer, 35, 45, TimeUnit.SECONDS);
+    executorService.scheduleAtFixedRate(this::rotateProducer, REFRESH_SECONDS, REFRESH_SECONDS, TimeUnit.SECONDS);
   }
 
   public KafkaProducer<K, V> get() {
+    if (lastCheck.isBefore(Instant.now().minusSeconds(CLOSE_DELAY_SECONDS / 2))) {
+      LOG.info("Updating thread local reference");
+      localclient.set(mainKafkaProducer.get());
+      lastCheck = Instant.now();
+    }
+
     return mainKafkaProducer.get();
   }
 
   protected void rotateProducer() {
-    LOG.info("Rotating producer");
+    LOG.info("Producer trying to get lock");
+    lockService.getLock().lock();
+    LOG.info("Producer got lock");
+
     KafkaProducer<K, V> nextProducer = new KafkaProducer<>(producerProperties.getProperties());
-    backupKafkaProducer = mainKafkaProducer.getAndSet(nextProducer);
+    LOG.info("Rotating producer");
+    KafkaProducer<K, V> oldProducer = mainKafkaProducer.getAndSet(nextProducer);
+    lockService.getLock().unlock();
+    LOG.info("Producer unlocked");
     try {
-      Thread.sleep(2000L);
+      Thread.sleep(CLOSE_DELAY_SECONDS * 1000);
     } catch (InterruptedException e) {
       LOG.error("Failed to sleep");
     }
     LOG.info("Closing old producer");
-    backupKafkaProducer.close();
+    oldProducer.close();
     LOG.info("Old producer is closed");
   }
 
